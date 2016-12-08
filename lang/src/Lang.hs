@@ -2,6 +2,8 @@
 module Lang where
     
 import GHC.Exts()
+import Data.Maybe
+
 
 type Env = [(String, Value)]
 type Context = [(String, Type)]
@@ -29,11 +31,11 @@ multValue::Value -> Value -> Value
 multValue (IntV x) (IntV y) = IntV $ x * y
 
 divValue::Value -> Value -> Value
-divValue (IntV x) (IntV 0) = ErrorV "Cannot divide by zero"
-divValue (IntV x) (IntV y) = IntV $ x / y
+divValue (IntV _) (IntV 0) = ErrorV "Cannot divide by zero"
+divValue (IntV x) (IntV y) = IntV $ div x y
 
 modValue::Value -> Value -> Value
-modValue (IntV x) (IntV 0) = ErrorV "Cannot mod by zero"
+modValue (IntV _) (IntV 0) = ErrorV "Cannot mod by zero"
 modValue (IntV x) (IntV y) = IntV $ mod x y
 
 
@@ -52,6 +54,8 @@ data AST :: * where
     App      :: AST -> AST -> AST
     deriving (Show, Eq)
 
+
+
 instance Num AST where
     fromInteger :: Integer -> AST
     fromInteger = IntT . fromInteger
@@ -68,10 +72,7 @@ instance Num AST where
 runLang :: Env -> AST -> Value
 runLang _ (IntT x) = IntV x
 runLang _ (BoolT x) = BoolV x
-runLang env (VarT x) = 
-    case lookup x env of
-        Just y -> y
-        Nothing -> ErrorV ("No definition of variable: " ++ x)
+runLang env (VarT x) = fromMaybe (ErrorV ("No definition of variable: " ++ x)) (lookup x env)
 runLang env (Add x y)  = addValue (runLang env x) (runLang env y)
 runLang env (Sub x y)  = subValue (runLang env x) (runLang env y)
 runLang env (Mult x y) = multValue (runLang env x) (runLang env y)
@@ -109,11 +110,6 @@ typeCheck cont (Sub l r) = checkArithmeticType cont l r
 typeCheck cont (Mult l r) = checkArithmeticType cont l r
 typeCheck cont (Div l r) = checkArithmeticType cont l r
 typeCheck cont (Mod l r) = checkArithmeticType cont l r
-
-
-typeCheck cont (VarT name) = 
-    lookup name cont
-
 typeCheck cont (If bool trueResult falseResult) =
     do
         boolType  <- typeCheck cont bool
@@ -132,11 +128,17 @@ typeCheck cont (App func arg) =
                                                         expectedArgType -> return returnType
             otherwise -> Nothing
 
+
+
+typeCheck cont (VarT name) = 
+    lookup name cont
+
 typeCheck cont (Let name arg body) =
     do
         argType <- typeCheck cont arg
         bodyType <- typeCheck ((name,argType):cont) body
         return bodyType
+
 
 typeCheck _ _ = Nothing
 
