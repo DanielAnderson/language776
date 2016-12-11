@@ -1,12 +1,19 @@
+-- Written by: Daniel Anderson
+-- EECS 776 Practical
+-- Citations:
+-- https://www.schoolofhaskell.com/school/starting-with-haskell/basics-of-haskell/10_Error_Handling#the-either-monad
+
 {-# LANGUAGE GADTs, KindSignatures, InstanceSigs, OverloadedStrings  #-}
 module Lang where
     
 import GHC.Exts()
-import Data.Maybe
+import Control.Monad (ap)
 
 
 type Env = [(String, Value)]
 type Context = [(String, Type)]
+newtype Evaluator a = Ev (Either Value a)
+data IntComparison = Gt | Lt | Ge | Le | Eq | Ne deriving (Show, Eq)
 
 data Value:: * where
     BoolV    :: Bool -> Value
@@ -15,35 +22,74 @@ data Value:: * where
     ErrorV   :: String -> Value
     deriving (Show, Eq)
 
+
 data Type:: * where
     IntType     :: Type
     BoolType    :: Type
     LamType     :: Type -> Type -> Type -- Argtype, return type
     deriving (Show, Eq)
 
+instance Monad Evaluator where
+    (Ev ev) >>= k =
+        case ev of
+          Left msg -> Ev (Left msg)
+          Right v -> k v
+    return v = Ev (Right v)
+    fail msg = Ev (Left (ErrorV msg))
+
+instance Applicative Evaluator  where
+    pure = return
+    (<*>) = ap
+
+instance Functor Evaluator  where
+    fmap f m = pure f <*> m 
+
 addValue::Value -> Value -> Value
 addValue (IntV x) (IntV y) = IntV $ x + y
+addValue _ _ = ErrorV "Undefined addition"
+
 
 subValue::Value -> Value -> Value
 subValue (IntV x) (IntV y) = IntV $ x - y
+subValue _ _ = ErrorV "Undefined subtraction"
 
 multValue::Value -> Value -> Value
 multValue (IntV x) (IntV y) = IntV $ x * y
+multValue _ _ = ErrorV "Undefined multiplication"
 
 divValue::Value -> Value -> Value
 divValue (IntV _) (IntV 0) = ErrorV "Cannot divide by zero"
 divValue (IntV x) (IntV y) = IntV $ div x y
+divValue _ _ = ErrorV "Undefined division"
 
 modValue::Value -> Value -> Value
 modValue (IntV _) (IntV 0) = ErrorV "Cannot mod by zero"
 modValue (IntV x) (IntV y) = IntV $ mod x y
+modValue _ _ = ErrorV "Undefined mod operation"
 
+runArithmetic::Env -> (Value -> Value -> Value) -> AST -> AST -> Evaluator Value
+runArithmetic env op leftArg rightArg =
+    do
+        leftEval <- runLang env leftArg
+        rightEval <- runLang env rightArg
+        return $ op leftEval rightEval
+
+compareInt:: IntComparison -> Value -> Value -> Value
+compareInt op (IntV l) (IntV r) = BoolV $ (toIntCompare op) l r
+
+toIntCompare:: IntComparison -> (Int -> Int -> Bool)
+toIntCompare Ge = (>=)
+toIntCompare Le = (<=)
+toIntCompare Gt = (>)
+toIntCompare Lt = (<)
+toIntCompare Ne = (/=)
+toIntCompare Eq = (==)
 
 data AST :: * where
     BoolT    :: Bool -> AST
     IntT     :: Int  -> AST
     VarT     :: String -> AST
-    LamT     :: AST -> Type -> AST -> AST           --VarT, Body
+    LamT     :: String -> Type -> AST -> AST           --VarT, Body
     If       :: AST -> AST -> AST -> AST
     Add      :: AST -> AST -> AST
     Mult     :: AST -> AST -> AST
@@ -52,6 +98,7 @@ data AST :: * where
     Mod      :: AST -> AST -> AST
     Let      :: String -> AST -> AST -> AST
     App      :: AST -> AST -> AST
+    CompInt  :: IntComparison -> AST -> AST -> AST
     deriving (Show, Eq)
 
 
@@ -69,38 +116,63 @@ instance Num AST where
     (*) :: AST -> AST -> AST
     (*) = Mult
 
-runLang :: Env -> AST -> Value
-runLang _ (IntT x) = IntV x
-runLang _ (BoolT x) = BoolV x
-runLang env (VarT x) = fromMaybe (ErrorV ("No definition of variable: " ++ x)) (lookup x env)
-runLang env (Add x y)  = addValue (runLang env x) (runLang env y)
-runLang env (Sub x y)  = subValue (runLang env x) (runLang env y)
-runLang env (Mult x y) = multValue (runLang env x) (runLang env y)
-runLang env (Div x y)  = divValue (runLang env x) (runLang env y)
-runLang env (Mod x y)  = modValue (runLang env x) (runLang env y)
+eval :: AST -> Value
+eval program = case runLang [] program of
+    Ev (Left a) -> a
+    Ev (Right a) -> a
+
+runLang :: Env -> AST -> Evaluator Value
+runLang _ (IntT x) = return $ IntV x
+runLang _ (BoolT x) = return $ BoolV x
+runLang env (VarT x) = 
+    case lookup x env of
+            Just a -> return a
+            Nothing -> fail $ "Undefined: " ++ x
+runLang env (Add x y)  = runArithmetic env addValue x y
+runLang env (Sub x y)  = runArithmetic env subValue x y
+runLang env (Mult x y) = runArithmetic env multValue x y
+runLang env (Div x y)  = runArithmetic env divValue x y
+runLang env (Mod x y)  = runArithmetic env modValue x y
 
 runLang env (If bool trueCase falseCase) = 
-    case (runLang env bool) of 
-        BoolV True  -> runLang env trueCase
-        BoolV False -> runLang env falseCase
+    do 
+        boolEval <- runLang env bool
+        case boolEval of 
+            BoolV True -> runLang env trueCase
+            BoolV False -> runLang env falseCase
+            _ -> fail "Error, expected boolean"
 
 runLang env (Let varName varExpr body) =
-    runLang ((varName,runLang env varExpr):env) body
+    do
+        argVal <- runLang env varExpr
+        runLang ((varName,argVal):env) body
 
-runLang env (LamT (VarT varName) argType body) =
-    ClosureV varName body env
+runLang env (LamT varName _ body) =
+    return $ ClosureV varName body env
+
+runLang _ (LamT _ _ _) = return $ ErrorV "Undefined lambda"
 
 runLang env (App fun arg) =
-    runApp (runLang env fun) (runLang env arg)
+    do
+        funEval <- runLang env fun
+        argEval <- runLang env arg
+        runApp funEval argEval
 
-runApp :: Value -> Value -> Value
+runLang env (CompInt op left right) = 
+    do
+        leftEval <- runLang env left
+        rightEval <- runLang env right
+        return $ compareInt op leftEval rightEval
+
+runApp :: Value -> Value -> Evaluator Value
 runApp (ClosureV varName body closEnv) argEvaluated =
     runLang ((varName,argEvaluated):closEnv) body
+runApp _ _ = return $ ErrorV "Invalid application"
 
-typeCheck :: Context -> AST -> (Maybe Type)
+typeCheck :: Context -> AST -> Maybe Type
 typeCheck _ (IntT _) = Just IntType
 typeCheck _ (BoolT _) = Just BoolType
-typeCheck cont (LamT (VarT argName) argType body) =
+typeCheck cont (LamT argName argType body) =
     do
         bodyType <- typeCheck ((argName, argType):cont) body
         return $ LamType argType bodyType
@@ -125,8 +197,10 @@ typeCheck cont (App func arg) =
         argType  <- typeCheck cont arg
         case funcType of
             (LamType expectedArgType returnType) -> case argType of
-                                                        expectedArgType -> return returnType
-            otherwise -> Nothing
+                                                        actualArgType -> if actualArgType == expectedArgType 
+                                                            then return returnType 
+                                                            else Nothing
+            _ -> Nothing
 
 
 
@@ -136,12 +210,12 @@ typeCheck cont (VarT name) =
 typeCheck cont (Let name arg body) =
     do
         argType <- typeCheck cont arg
-        bodyType <- typeCheck ((name,argType):cont) body
-        return bodyType
+        typeCheck ((name,argType):cont) body
 
 
 typeCheck _ _ = Nothing
 
+checkArithmeticType:: Context -> AST -> AST -> Maybe Type
 checkArithmeticType cont l r = 
     do
         leftType  <- typeCheck cont l
