@@ -9,6 +9,51 @@ module Lang where
 import GHC.Exts()
 import Control.Monad (ap)
 
+toIntCompare:: IntComparison -> (Int -> Int -> Bool)
+toIntCompare Ge = (>=)
+toIntCompare Le = (<=)
+toIntCompare Gt = (>)
+toIntCompare Lt = (<)
+toIntCompare Ne = (/=)
+toIntCompare Eq = (==)
+
+data BoolOperation = And | Or deriving (Show, Eq)
+
+toBoolOp::BoolOperation -> (Bool -> Bool -> Bool)
+toBoolOp And = (&&)
+toBoolOp Or = (||)
+
+data AST :: * where
+    BoolT    :: Bool -> AST
+    IntT     :: Int  -> AST
+    VarT     :: String -> AST
+    LamT     :: String -> Type -> AST -> AST           --VarT, Body
+    If       :: AST -> AST -> AST -> AST
+    Add      :: AST -> AST -> AST
+    Mult     :: AST -> AST -> AST
+    Sub      :: AST -> AST -> AST
+    Div      :: AST -> AST -> AST
+    Mod      :: AST -> AST -> AST
+    Let      :: String -> AST -> AST -> AST
+    App      :: AST -> AST -> AST
+    CompInt  :: IntComparison -> AST -> AST -> AST
+    BoolOp2  :: BoolOperation -> AST -> AST -> AST 
+    deriving (Show, Eq)
+
+
+
+instance Num AST where
+    fromInteger :: Integer -> AST
+    fromInteger = IntT . fromInteger
+
+    (+) :: AST -> AST -> AST
+    (+) = Add
+
+    (-) :: AST -> AST -> AST
+    (-) = Sub
+
+    (*) :: AST -> AST -> AST
+    (*) = Mult
 
 type Env = [(String, Value)]
 type Context = [(String, Type)]
@@ -67,6 +112,11 @@ modValue (IntV _) (IntV 0) = ErrorV "Cannot mod by zero"
 modValue (IntV x) (IntV y) = IntV $ mod x y
 modValue _ _ = ErrorV "Undefined mod operation"
 
+evaluatorToValue:: Evaluator Value -> Value
+evaluatorToValue (Ev (Right v)) = v
+evaluatorToValue (Ev (Left v)) = v
+
+
 runArithmetic::Env -> (Value -> Value -> Value) -> AST -> AST -> Evaluator Value
 runArithmetic env op leftArg rightArg =
     do
@@ -77,44 +127,8 @@ runArithmetic env op leftArg rightArg =
 compareInt:: IntComparison -> Value -> Value -> Value
 compareInt op (IntV l) (IntV r) = BoolV $ (toIntCompare op) l r
 
-toIntCompare:: IntComparison -> (Int -> Int -> Bool)
-toIntCompare Ge = (>=)
-toIntCompare Le = (<=)
-toIntCompare Gt = (>)
-toIntCompare Lt = (<)
-toIntCompare Ne = (/=)
-toIntCompare Eq = (==)
-
-data AST :: * where
-    BoolT    :: Bool -> AST
-    IntT     :: Int  -> AST
-    VarT     :: String -> AST
-    LamT     :: String -> Type -> AST -> AST           --VarT, Body
-    If       :: AST -> AST -> AST -> AST
-    Add      :: AST -> AST -> AST
-    Mult     :: AST -> AST -> AST
-    Sub      :: AST -> AST -> AST
-    Div      :: AST -> AST -> AST
-    Mod      :: AST -> AST -> AST
-    Let      :: String -> AST -> AST -> AST
-    App      :: AST -> AST -> AST
-    CompInt  :: IntComparison -> AST -> AST -> AST
-    deriving (Show, Eq)
-
-
-
-instance Num AST where
-    fromInteger :: Integer -> AST
-    fromInteger = IntT . fromInteger
-
-    (+) :: AST -> AST -> AST
-    (+) = Add
-
-    (-) :: AST -> AST -> AST
-    (-) = Sub
-
-    (*) :: AST -> AST -> AST
-    (*) = Mult
+boolOp:: BoolOperation -> Value -> Value -> Value
+boolOp op (BoolV l) (BoolV r) = BoolV $ (toBoolOp op) l r
 
 eval :: AST -> Value
 eval program = case runLang [] program of
@@ -127,7 +141,7 @@ runLang _ (BoolT x) = return $ BoolV x
 runLang env (VarT x) = 
     case lookup x env of
             Just a -> return a
-            Nothing -> fail $ "Undefined: " ++ x
+            Nothing -> fail $ "Undefined variable: " ++ x
 runLang env (Add x y)  = runArithmetic env addValue x y
 runLang env (Sub x y)  = runArithmetic env subValue x y
 runLang env (Mult x y) = runArithmetic env multValue x y
@@ -142,10 +156,15 @@ runLang env (If bool trueCase falseCase) =
             BoolV False -> runLang env falseCase
             _ -> fail "Error, expected boolean"
 
+-- To be completely honest - I did not expect this solution to work for a recursive let function
+-- I was plesantly surprised when it worked out. Apparently lazy languages have a hell of an advantage
+-- Note - I did think of doing it this way on my own. I wouldn't be surprised if there are similar
+-- solutions online. I just tried a few things to try to avoid using the IO monad here
 runLang env (Let varName varExpr body) =
     do
-        argVal <- runLang env varExpr
         runLang ((varName,argVal):env) body
+    where argVal = evaluatorToValue $ runLang ((varName,argVal):env) varExpr
+
 
 runLang env (LamT varName _ body) =
     return $ ClosureV varName body env
@@ -163,6 +182,13 @@ runLang env (CompInt op left right) =
         leftEval <- runLang env left
         rightEval <- runLang env right
         return $ compareInt op leftEval rightEval
+
+runLang env (BoolOp2 op left right) =
+    do
+        leftEval <- runLang env left
+        rightEval <- runLang env right
+        return $  boolOp op leftEval rightEval
+
 
 runApp :: Value -> Value -> Evaluator Value
 runApp (ClosureV varName body closEnv) argEvaluated =
