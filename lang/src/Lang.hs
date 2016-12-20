@@ -2,7 +2,7 @@
 -- EECS 776 Practical
 -- Citations:
 -- https://www.schoolofhaskell.com/school/starting-with-haskell/basics-of-haskell/10_Error_Handling#the-either-monad
-
+-- Lang.hs
 {-# LANGUAGE GADTs, KindSignatures, InstanceSigs, OverloadedStrings  #-}
 module Lang where
     
@@ -58,6 +58,7 @@ instance Num AST where
 type Env = [(String, Value)]
 type Context = [(String, Type)]
 newtype Evaluator a = Ev (Either Value a)
+newtype TypeChecker a = Ty (Either String a) deriving (Show, Eq)
 data IntComparison = Gt | Lt | Ge | Le | Eq | Ne deriving (Show, Eq)
 
 data Value:: * where
@@ -72,6 +73,7 @@ data Type:: * where
     IntType     :: Type
     BoolType    :: Type
     LamType     :: Type -> Type -> Type -- Argtype, return type
+    FailureType :: String -> Type
     deriving (Show, Eq)
 
 instance Monad Evaluator where
@@ -81,6 +83,21 @@ instance Monad Evaluator where
           Right v -> k v
     return v = Ev (Right v)
     fail msg = Ev (Left (ErrorV msg))
+
+instance Monad TypeChecker where
+    (Ty ev) >>= k = 
+        case ev of
+            Left msg -> Ty (Left msg)
+            Right v -> k v
+    return v = Ty (Right v)
+    fail msg = Ty (Left msg)
+
+instance Applicative TypeChecker  where
+    pure = return
+    (<*>) = ap
+
+instance Functor TypeChecker  where
+    fmap f m = pure f <*> m 
 
 instance Applicative Evaluator  where
     pure = return
@@ -126,14 +143,17 @@ runArithmetic env op leftArg rightArg =
 
 compareInt:: IntComparison -> Value -> Value -> Value
 compareInt op (IntV l) (IntV r) = BoolV $ (toIntCompare op) l r
+compareInt _ _ _ = ErrorV "Can only compare integers"
 
 boolOp:: BoolOperation -> Value -> Value -> Value
 boolOp op (BoolV l) (BoolV r) = BoolV $ (toBoolOp op) l r
 
 eval :: AST -> Value
-eval program = case runLang [] program of
-    Ev (Left a) -> a
-    Ev (Right a) -> a
+eval program = case typeCheck [] program of
+                Ty (Right _)  -> case runLang [] program of
+                            Ev (Left a) -> a
+                            Ev (Right a) -> a
+                Ty (Left msg) -> ErrorV $ "Typecheck error: " ++ msg
 
 runLang :: Env -> AST -> Evaluator Value
 runLang _ (IntT x) = return $ IntV x
@@ -169,8 +189,6 @@ runLang env (Let varName varExpr body) =
 runLang env (LamT varName _ body) =
     return $ ClosureV varName body env
 
-runLang _ (LamT _ _ _) = return $ ErrorV "Undefined lambda"
-
 runLang env (App fun arg) =
     do
         funEval <- runLang env fun
@@ -195,14 +213,16 @@ runApp (ClosureV varName body closEnv) argEvaluated =
     runLang ((varName,argEvaluated):closEnv) body
 runApp _ _ = return $ ErrorV "Invalid application"
 
-typeCheck :: Context -> AST -> Maybe Type
-typeCheck _ (IntT _) = Just IntType
-typeCheck _ (BoolT _) = Just BoolType
-typeCheck cont (LamT argName argType body) =
+
+typeCheck :: Context -> AST -> TypeChecker Type
+typeCheck _ (IntT _) = return IntType
+typeCheck _ (BoolT _) = return BoolType
+typeCheck cont (LamT argName (LamType argType returnType) body) =
     do
         bodyType <- typeCheck ((argName, argType):cont) body
-        return $ LamType argType bodyType
-
+        if bodyType == returnType
+            then return $ LamType argType bodyType
+            else fail $ "In lambda expected return::" ++ (show returnType) ++ " value does not match type of body::" ++ (show bodyType)
 typeCheck cont (Add l r) = checkArithmeticType cont l r
 typeCheck cont (Sub l r) = checkArithmeticType cont l r
 typeCheck cont (Mult l r) = checkArithmeticType cont l r
@@ -213,39 +233,61 @@ typeCheck cont (If bool trueResult falseResult) =
         boolType  <- typeCheck cont bool
         trueType  <- typeCheck cont trueResult
         falseType <- typeCheck cont falseResult
-        if (boolType == BoolType) && (trueType == falseType)
-            then return trueType
-            else Nothing
+        if (boolType == BoolType)
+            then 
+                if (trueType == falseType)
+                    then return trueType
+                    else fail $ "Need both branches of if statement to be of same type. True branch: " ++ (show trueType) ++ ". False branch: " ++ (show falseType)
+            else
+                fail $ "First argument to if statement must be boolean. Recieved: " ++ (show bool)
 
 typeCheck cont (App func arg) = 
     do
         funcType <- typeCheck cont func
         argType  <- typeCheck cont arg
-        case funcType of
-            (LamType expectedArgType returnType) -> case argType of
-                                                        actualArgType -> if actualArgType == expectedArgType 
-                                                            then return returnType 
-                                                            else Nothing
-            _ -> Nothing
+        typeCheckApp funcType argType
+
+        -- case funcType of
+        --      (LamType expectedArgType returnType) -> case argType of
+        --                                                 actualArgType -> if actualArgType == expectedArgType 
+        --                                                     then return returnType 
+        --                                                     else fail $ "Expected: " ++ (show expectedArgType) ++ ", received: " ++ (show actualArgType)
+        --     _ -> Nothing
 
 
 
 typeCheck cont (VarT name) = 
-    lookup name cont
+    case lookup name cont of
+        Just typ -> return typ
+        Nothing -> fail $ "Could not find: " ++ name
 
 typeCheck cont (Let name arg body) =
     do
         argType <- typeCheck cont arg
         typeCheck ((name,argType):cont) body
+        
+typeCheck cont (CompInt _ l r)
+    = do
+        leftType <- typeCheck cont l
+        rightType <- typeCheck cont r
+        if (leftType == IntType) && (rightType == IntType)
+            then return BoolType
+            else fail "Integer comparison requires two integer inputs"
 
+typeCheck _ ast = fail $ "Cannot typecheck: " ++ (show ast)
 
-typeCheck _ _ = Nothing
-
-checkArithmeticType:: Context -> AST -> AST -> Maybe Type
+checkArithmeticType:: Context -> AST -> AST -> TypeChecker Type
 checkArithmeticType cont l r = 
     do
         leftType  <- typeCheck cont l
         rightType <- typeCheck cont r
         if (leftType == IntType) && (rightType == IntType)
             then return IntType 
-            else Nothing
+            else fail $ "Cannot do arithmetic on: " ++ (show l)++ "::" ++ (show leftType) ++ " and " ++ (show r) ++ "::" ++ (show rightType)
+
+typeCheckApp:: Type -> Type -> TypeChecker Type
+typeCheckApp (LamType lamArgType lamReturnType) actualArgType = 
+    if lamArgType == actualArgType
+        then return lamReturnType
+        else fail $ "Expected argument type of: " ++ show lamArgType ++ " received: " ++ show actualArgType
+typeCheckApp nonLamType _ = fail $ "Expected function, received: " ++ show nonLamType

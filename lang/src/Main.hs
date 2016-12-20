@@ -7,11 +7,11 @@ import Data.List
 
 data TestAST:: * where
     TestEval   :: String -> AST -> Value -> TestAST
-    TestTypeCheck :: String -> AST -> Maybe Type -> TestAST
+    TestTypeCheck :: String -> AST -> TypeChecker Type -> TestAST
 
 data TestResult:: * where
     TestRunResult :: String -> Bool -> AST -> Value -> Value -> TestResult -- Discription, pass/fail, input, expected, actual
-    TestTypeResult :: String -> Bool -> AST -> Maybe Type -> Maybe Type -> TestResult
+    TestTypeResult :: String -> Bool -> AST -> TypeChecker Type -> TypeChecker Type -> TestResult
 instance Show TestAST where
     show (TestEval disc _ _) = disc
     show (TestTypeCheck disc _ _) = disc
@@ -45,7 +45,7 @@ testBoolTrue = TestEval "Testing boolean true" (BoolT True) (BoolV True)
 testBoolFalse = TestEval "Testing boolean false" (BoolT False) (BoolV False)
 testIfTrue = TestEval "Testing true condition" (If (BoolT True) 1 2) (IntV 1)
 testIfFalse = TestEval "Testing false condition" (If (BoolT False) 1 2) (IntV 2)
-testUndefined = TestEval "Testing undefined var" (VarT "foo") (ErrorV "Undefined variable: foo")
+testUndefined = TestEval "Testing undefined var" (VarT "foo") (ErrorV "Typecheck error: Could not find: foo")
 testDefined = TestEval "Testing defined var" (Let "x" 2 (Add (VarT "x") 3)) (IntV 5)
 testLambda = TestEval "Testing lambda" (LamT "x" IntType (Add (VarT "x") 3)) (ClosureV "x" (Add (VarT "x") 3) [])
 testApp = TestEval "Testing application" (App (LamT "x" IntType (Add (VarT "x") 3)) 4) (IntV 7)
@@ -60,7 +60,7 @@ testLamType = TestTypeCheck "Testing typecheck: Int->Int"
                             $ return (LamType IntType IntType) 
 testFailType = TestTypeCheck "Testing failure of typecheck with bool + int"
                             (LamT "x" BoolType (Add (VarT "x") 1))
-                            Nothing
+                            (fail "...")
 testIfType = TestTypeCheck "Testing simple if statement"
                             (If (BoolT True) 1 2)
                             $ return IntType
